@@ -1,0 +1,183 @@
+:root {
+	/* Sensible defaults; overridden live by index.js once the camera starts. */
+	--bg: hsl(220 20% 12%);
+	--bg-1: hsl(220 20% 10%);
+	--bg-2: hsl(220 20% 16%);
+	--bg-3: hsl(220 20% 22%);
+	--bg-4: hsl(220 20% 28%);
+	--fg: hsl(40 80% 90%);
+	--fg-1: hsl(40 80% 92%);
+	--fg-2: hsl(40 80% 80%);
+	--fg-3: hsl(40 80% 70%);
+	--fg-4: hsl(40 80% 60%);
+	--accent: hsl(200 90% 70%);
+	--transition-time: 1s;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+html, body {
+	margin: 0;
+	padding: 0;
+}
+
+body {
+	font-family: system-ui, sans-serif;
+	font-size: 1rem;
+	line-height: 1.6;
+	min-height: 100vh;
+	background: var(--bg);
+	color: var(--fg);
+	transition: background var(--transition-time) ease, color var(--transition-time) ease;
+}
+
+header, main, footer {
+	max-width: 60rem;
+	margin: 0 auto;
+	padding: 2rem;
+}
+
+h1 {
+	font-size: 2.5rem;
+	margin: 0 0 0.5rem;
+	color: var(--fg-1);
+	text-shadow: 0 0 0.25rem var(--bg-1);
+}
+
+h2 {
+	font-size: 1.5rem;
+	margin: 0 0 0.75rem;
+	color: var(--fg-2);
+}
+
+header p {
+	font-size: 1.125rem;
+	color: var(--fg-3);
+}
+
+.card {
+	background: var(--bg-2);
+	border: thin solid var(--fg-4);
+	border-radius: 0.75rem;
+	padding: 1.5rem;
+	margin: 1.5rem 0;
+	color: var(--fg);
+	transition: background var(--transition-time) ease, border-color var(--transition-time) ease, color var(--transition-time) ease;
+}
+
+.card--accent {
+	background: var(--bg-3);
+	border-color: var(--accent);
+}
+
+.card ol, .card p {
+	margin: 0.5rem 0;
+}
+
+code {
+	font-family: ui-monospace, monospace;
+	font-size: 1rem;
+	background: var(--bg-4);
+	color: var(--fg-1);
+	padding: 0 0.25rem;
+	border-radius: 0.25rem;
+}
+
+a, a:visited {
+	color: var(--accent);
+	text-decoration-color: var(--fg-3);
+}
+
+button {
+	font: inherit;
+	color: var(--bg-1);
+	background: var(--accent);
+	border: thin solid var(--fg-2);
+	border-radius: 0.5rem;
+	padding: 0.5rem 1rem;
+	cursor: pointer;
+	transition: background var(--transition-time) ease, color var(--transition-time) ease;
+}
+
+button:hover {
+	background: var(--fg-2);
+	color: var(--bg-1);
+}
+
+.muted {
+	color: var(--fg-3);
+	font-size: 1rem;
+}
+
+.control {
+	display: flex;
+	align-items: center;
+	gap: 1rem;
+	flex-wrap: wrap;
+}
+
+.control label {
+	flex: 0 0 auto;
+}
+
+.control input[type="range"] {
+	flex: 1 1 14rem;
+	min-width: 0;
+	accent-color: var(--accent);
+}
+
+.control output {
+	font-variant-numeric: tabular-nums;
+}
+
+.preview {
+	display: flex;
+	gap: 1rem;
+	align-items: stretch;
+	flex-wrap: wrap;
+}
+
+#camera,
+#frame {
+	flex: 1 1 14rem;
+	min-width: 0;
+	width: 100%;
+	height: auto;
+	aspect-ratio: 16 / 9;
+	object-fit: cover;
+	border-radius: 0.5rem;
+	border: thin solid var(--fg-4);
+	background: var(--bg-1);
+	transform: scaleX(-1); /* mirror like a selfie cam */
+}
+
+#frame {
+	image-rendering: pixelated;
+}
+
+.swatches {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+	margin-top: 0.75rem;
+}
+
+.swatch {
+	display: inline-block;
+	width: 2.5rem;
+	height: 2.5rem;
+	border-radius: 0.5rem;
+	border: thin solid var(--fg-4);
+}
+
+.swatch--fg {
+	border-style: dashed;
+}
+
+footer {
+	text-align: center;
+	color: var(--fg-3);
+	font-size: 1rem;
+}

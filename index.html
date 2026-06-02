@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>cssadapt - camera-driven CSS colours</title>
+	<link href="style.css" rel="stylesheet">
+</head>
+<body>
+	<header>
+		<h1>cssadapt</h1>
+		<p class="lede">
+			Point your camera at the world. The page picks the most common
+			colours it sees and uses them as live CSS custom properties.
+		</p>
+	</header>
+
+	<main>
+		<section class="card">
+			<h2>How it works</h2>
+			<ol>
+				<li>A frame is grabbed from the webcam roughly once a second.</li>
+				<li>Pixels are quantised into hue / saturation / lightness buckets.</li>
+				<li>Buckets are split into <em>low</em> and <em>high</em> luminosity groups.</li>
+				<li>Low luminosity colours become backgrounds, high become foregrounds.</li>
+			</ol>
+		</section>
+
+		<section class="card card--accent">
+			<h2>Live palette</h2>
+			<p>
+				<button id="toggle" type="button">Start camera</button>
+				<span id="status" class="muted">Camera is off.</span>
+			</p>
+			<p class="control">
+				<label for="rate">Sample every <output id="rate-value">1.00</output> s</label>
+				<input id="rate" type="range" min="0.25" max="10" step="0.25" value="1">
+			</p>
+			<div id="swatches" class="swatches" aria-label="Extracted colour swatches"></div>
+		</section>
+
+		<section class="card">
+			<h2>Camera preview</h2>
+			<div class="preview">
+				<video id="camera" autoplay muted playsinline></video>
+				<canvas id="frame" aria-hidden="true"></canvas>
+			</div>
+			<p class="muted">
+				The canvas is a small down-sampled copy used for analysis.
+			</p>
+		</section>
+
+		<section class="card">
+			<h2>Sample content</h2>
+			<p>
+				Every coloured element on this page references one of the
+				CSS variables that <code>index.js</code> sets on
+				<code>:root</code>: <code>--bg</code>, <code>--fg</code>,
+				<code>--accent</code>, <code>--bg-1</code>&hellip;<code>--bg-4</code>,
+				and <code>--fg-1</code>&hellip;<code>--fg-4</code>.
+			</p>
+			<p>
+				<a href="#">A link styled with the accent colour</a> sits
+				next to a <button type="button">themed button</button>.
+			</p>
+		</section>
+	</main>
+
+	<footer>
+		<p>Camera frames never leave the browser.</p>
+	</footer>
+
+	<script type="module">
+		import { init, hslToCss } from './index.js';
+
+		const video = document.getElementById('camera');
+		const canvas = document.getElementById('frame');
+		const status = document.getElementById('status');
+		const swatches = document.getElementById('swatches');
+		const toggle = document.getElementById('toggle');
+		const rate = document.getElementById('rate');
+		const rateValue = document.getElementById('rate-value');
+
+		const applyPeriod = (seconds) => {
+			rateValue.textContent = seconds.toFixed(2);
+			// The library publishes --transition-time itself when the
+			// interval changes, so the page eases at the sample cadence.
+		};
+
+		applyPeriod(parseFloat(rate.value));
+
+		const renderSwatches = ({ lows, highs }) => {
+			swatches.innerHTML = '';
+			const add = (group, c, label) => {
+				const sw = document.createElement('span');
+				sw.className = `swatch swatch--${group}`;
+				sw.style.background = hslToCss(c.h, c.s, c.l);
+				sw.title = `${label} L=${c.luminance.toFixed(2)}`;
+				swatches.append(sw);
+			};
+			lows.forEach((c, i) => add('bg', c, `bg-${i + 1}`));
+			highs.forEach((c, i) => add('fg', c, `fg-${i + 1}`));
+		};
+
+		const handle = await init({
+			video,
+			canvas,
+			intervalMs: parseFloat(rate.value) * 1000,
+			onPalette: (palette, groups) => {
+				status.textContent = `Sampled ${palette.length} colour clusters.`;
+				renderSwatches(groups);
+			},
+		});
+
+		rate.addEventListener('input', () => {
+			const seconds = parseFloat(rate.value);
+			applyPeriod(seconds);
+			handle.setInterval(seconds * 1000);
+		});
+
+		toggle.addEventListener('click', async () => {
+			if (handle.running) {
+				handle.stop();
+				toggle.textContent = 'Start camera';
+				status.textContent = 'Camera is off.';
+				return;
+			}
+			try {
+				status.textContent = 'Requesting camera\u2026';
+				await handle.start();
+				toggle.textContent = 'Stop camera';
+			} catch (err) {
+				status.textContent = `Camera error: ${err.message}`;
+			}
+		});
+	</script>
+</body>
+</html>

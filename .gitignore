@@ -1,0 +1,12 @@
+# Ignore the default macOS metadata file
+.DS_Store
+
+# Editor noise
+.vscode/
+.idea/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

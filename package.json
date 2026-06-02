@@ -1,0 +1,43 @@
+{
+	"name": "cssadapt",
+	"version": "1.0.0",
+	"description": "Recolour a web page in real time from the dominant colours seen by the user's camera, exposed as CSS custom properties.",
+	"keywords": [
+		"camera",
+		"webcam",
+		"getUserMedia",
+		"css",
+		"custom-properties",
+		"colour",
+		"palette",
+		"luminance",
+		"theming"
+	],
+	"homepage": "https://github.com/ear1grey/cssadapt#readme",
+	"bugs": {
+		"url": "https://github.com/ear1grey/cssadapt/issues"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/ear1grey/cssadapt.git"
+	},
+	"license": "MIT",
+	"author": "Rich Boakes <rich.boakes@port.ac.uk>",
+	"type": "module",
+	"main": "./index.js",
+	"module": "./index.js",
+	"exports": {
+		".": "./index.js"
+	},
+	"files": [
+		"index.js",
+		"README.md",
+		"LICENSE"
+	],
+	"sideEffects": [
+		"./index.js"
+	],
+	"engines": {
+		"node": ">=18"
+	}
+}
