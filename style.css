@@ -111,6 +111,13 @@ button:hover {
 	font-size: 1rem;
 }
 
+.actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+	align-items: center;
+}
+
 .control {
 	display: flex;
 	align-items: center;
@@ -150,7 +157,13 @@ button:hover {
 	border-radius: 0.5rem;
 	border: thin solid var(--fg-4);
 	background: var(--bg-1);
-	transform: scaleX(-1); /* mirror like a selfie cam */
+}
+
+/* Only the user-facing camera is mirrored; the rear camera shows the world
+   as it is, so mirroring it would be wrong. Applied by index.html. */
+#camera.mirrored,
+#frame.mirrored {
+	transform: scaleX(-1);
 }
 
 #frame {
@@ -180,4 +193,12 @@ footer {
 	text-align: center;
 	color: var(--fg-3);
 	font-size: 1rem;
+}
+
+/* Colours still update; they just snap instead of sweeping. A page that
+   cross-fades its entire palette every second is a lot of motion. */
+@media (prefers-reduced-motion: reduce) {
+	*, *::before, *::after {
+		transition-duration: 0.01ms !important;
+	}
 }

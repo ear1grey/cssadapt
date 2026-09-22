@@ -27,10 +27,14 @@ const DEFAULTS = {
 	lumBuckets: 4,
 	paletteSize: 4,
 	lumSplit: 0.5,
+	minContrast: 4.5, // WCAG AA for body text; 0 disables the readability pass
+	minSpread: 0.02, // below this luminance range the frame is treated as flat
 	prefix: '--',
 	target: null, // resolved to document.documentElement at init time
 	video: null, // optional HTMLVideoElement; one is created if absent
 	canvas: null, // optional HTMLCanvasElement; one is created if absent
+	facingMode: 'environment', // 'environment' (world) or 'user' (selfie)
+	deviceId: null, // explicit device wins over facingMode when set
 	constraints: { audio: false, video: { width: 640, height: 360 } },
 	autoStart: false,
 	onPalette: null, // (palette, groups) => void
@@ -63,6 +67,31 @@ const rgbToHsl = (r, g, b) => {
 const hslToCss = (h, s, l) =>
 	`hsl(${h.toFixed(0)} ${(s * 100).toFixed(0)}% ${(l * 100).toFixed(0)}%)`;
 
+// Inverse of rgbToHsl; h in degrees, s/l in 0..1, returns 0..255 channels.
+const hslToRgb = (h, s, l) => {
+	if (s === 0) {
+		const v = Math.round(l * 255);
+		return [v, v, v];
+	}
+	const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+	const p = 2 * l - q;
+	const hk = ((h % 360) + 360) % 360 / 360;
+	const channel = (t) => {
+		let tc = t;
+		if (tc < 0) tc += 1;
+		if (tc > 1) tc -= 1;
+		if (tc < 1 / 6) return p + (q - p) * 6 * tc;
+		if (tc < 1 / 2) return q;
+		if (tc < 2 / 3) return p + (q - p) * (2 / 3 - tc) * 6;
+		return p;
+	};
+	return [
+		Math.round(channel(hk + 1 / 3) * 255),
+		Math.round(channel(hk) * 255),
+		Math.round(channel(hk - 1 / 3) * 255),
+	];
+};
+
 // Rec. 709 relative luminance on linearised RGB (0..1).
 const relativeLuminance = (r, g, b) => {
 	const lin = (c) => {
@@ -70,6 +99,64 @@ const relativeLuminance = (r, g, b) => {
 		return cs <= 0.03928 ? cs / 12.92 : ((cs + 0.055) / 1.055) ** 2.4;
 	};
 	return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+};
+
+// WCAG 2.x contrast ratio, 1..21, from two relative luminances.
+const contrastRatio = (l1, l2) => {
+	const hi = Math.max(l1, l2);
+	const lo = Math.min(l1, l2);
+	return (hi + 0.05) / (lo + 0.05);
+};
+
+// Push a colour's lightness away from a reference until it clears `ratio`.
+// Hue and saturation are preserved, so the result still belongs to the scene.
+const forceContrast = (colour, againstLuminance, ratio) => {
+	if (contrastRatio(colour.luminance, againstLuminance) >= ratio) return colour;
+
+	// Choose the direction that can actually reach the target, not the one the
+	// colour happens to start on: against a dark background, darkening a
+	// slightly-darker foreground bottoms out at black and still fails.
+	const canLighten = contrastRatio(1, againstLuminance) >= ratio;
+	const canDarken = contrastRatio(0, againstLuminance) >= ratio;
+	// When both work, go the way the colour already leans; when neither does
+	// (mid-grey backgrounds cap at ~5.3:1 either way) take the better of the
+	// two extremes so we still return the most legible colour available.
+	let darken;
+	if (canLighten && canDarken) darken = colour.luminance <= againstLuminance;
+	else if (canLighten) darken = false;
+	else if (canDarken) darken = true;
+	else darken = contrastRatio(0, againstLuminance) > contrastRatio(1, againstLuminance);
+
+	// Search the full lightness range, not just beyond the colour's current
+	// lightness, so a foreground on the wrong side can cross over.
+	let lo = 0;
+	let hi = 1;
+	let best = darken ? 0 : 1;
+
+	// 12 bisections lands within ~0.02% lightness; cheap at 1-2 Hz.
+	// Invariant: `best` is the most conservative lightness found that passes.
+	for (let i = 0; i < 12; i += 1) {
+		const mid = (lo + hi) / 2;
+		const [r, g, b] = hslToRgb(colour.h, colour.s, mid);
+		const lum = relativeLuminance(r, g, b);
+		if (contrastRatio(lum, againstLuminance) >= ratio) {
+			best = mid;
+			// Passing: pull back toward the background for a subtler result.
+			if (darken) lo = mid; else hi = mid;
+		} else if (darken) hi = mid; else lo = mid;
+	}
+
+	const [r, g, b] = hslToRgb(colour.h, colour.s, best);
+	return {
+		...colour,
+		r,
+		g,
+		b,
+		l: best,
+		luminance: relativeLuminance(r, g, b),
+		css: hslToCss(colour.h, colour.s, best),
+		adjusted: true,
+	};
 };
 
 // --- Frame analysis ------------------------------------------------------
@@ -119,7 +206,26 @@ const analyseImageData = (data, opts) => {
 	return palette;
 };
 
+// Order by hue, then lightness; greys (no meaningful hue) sort to the front so
+// the coloured run reads as a spectrum rather than being interrupted by them.
+const byHue = (colours) => [...colours].sort((a, z) => {
+	const ga = a.s < 0.1;
+	const gz = z.s < 0.1;
+	if (ga !== gz) return ga ? -1 : 1;
+	if (ga && gz) return a.l - z.l;
+	return a.h - z.h || a.l - z.l;
+});
+
 const splitByLuminance = (palette, opts) => {
+	// A capped lens or a blown-out frame collapses to one narrow luminance
+	// band; splitting it yields bg and fg that are nearly identical. Detect
+	// that here so applyPalette can widen the pair rather than emit mush.
+	const lums = palette.map((c) => c.luminance);
+	const spread = palette.length
+		? Math.max(...lums) - Math.min(...lums)
+		: 0;
+	const flat = spread < opts.minSpread;
+
 	const lows = palette.filter((c) => c.luminance < opts.lumSplit).slice(0, opts.paletteSize);
 	const highs = palette.filter((c) => c.luminance >= opts.lumSplit).slice(0, opts.paletteSize);
 
@@ -130,10 +236,38 @@ const splitByLuminance = (palette, opts) => {
 	if (highs.length === 0 && palette.length) {
 		highs.push([...palette].sort((a, z) => z.luminance - a.luminance)[0]);
 	}
-	return { lows, highs };
+	return { lows, highs, spread, flat };
 };
 
-const applyPalette = (target, { lows, highs }, opts) => {
+// Resolve the three headline roles, guaranteeing --fg and --accent are legible
+// on --bg. Returns the colours actually written so callers can display them.
+const resolveRoles = ({ lows, highs }, opts) => {
+	const bg = lows[0] || highs[0];
+	let fg = highs[0] || lows[0];
+	let accent = highs[1] || lows[1] || fg;
+	if (!bg || !fg) return { bg, fg, accent };
+
+	if (opts.minContrast > 0) {
+		// Prefer a real colour from the scene that already passes; only
+		// synthesise a lightness when nothing sampled is good enough.
+		const candidates = [...highs, ...lows];
+		const passing = candidates.find(
+			(c) => contrastRatio(c.luminance, bg.luminance) >= opts.minContrast,
+		);
+		fg = passing || forceContrast(fg, bg.luminance, opts.minContrast);
+
+		const accentPassing = candidates.find(
+			(c) => c !== fg
+				&& contrastRatio(c.luminance, bg.luminance) >= opts.minContrast,
+		);
+		accent = accentPassing
+			|| forceContrast(accent, bg.luminance, opts.minContrast);
+	}
+	return { bg, fg, accent };
+};
+
+const applyPalette = (target, groups, opts) => {
+	const { lows, highs } = groups;
 	const p = opts.prefix;
 	const pick = (arr, i) => arr[i] || arr[arr.length - 1];
 
@@ -143,12 +277,12 @@ const applyPalette = (target, { lows, highs }, opts) => {
 		if (lo) target.style.setProperty(`${p}bg-${i + 1}`, lo.css);
 		if (hi) target.style.setProperty(`${p}fg-${i + 1}`, hi.css);
 	}
-	const bg = lows[0] || highs[0];
-	const fg = highs[0] || lows[0];
-	const accent = highs[1] || lows[1] || fg;
+
+	const { bg, fg, accent } = resolveRoles(groups, opts);
 	if (bg) target.style.setProperty(`${p}bg`, bg.css);
 	if (fg) target.style.setProperty(`${p}fg`, fg.css);
 	if (accent) target.style.setProperty(`${p}accent`, accent.css);
+	return { bg, fg, accent };
 };
 
 // --- DOM plumbing --------------------------------------------------------
@@ -185,6 +319,28 @@ const init = async (userOptions = {}) => {
 	let stream = null;
 	let timerId = null;
 	let running = false;
+	let frozen = false;
+	let resumeOnVisible = false;
+	let lastRoles = null;
+
+	// Merge facingMode / deviceId into whatever video constraints were given,
+	// without clobbering a caller's width/height.
+	const buildConstraints = () => {
+		const base = opts.constraints || {};
+		const video = typeof base.video === 'object' && base.video !== null
+			? { ...base.video }
+			: {};
+		if (opts.deviceId) {
+			video.deviceId = { exact: opts.deviceId };
+			delete video.facingMode;
+		} else if (opts.facingMode) {
+			// Not `exact`: desktops have no environment camera and would throw
+			// OverconstrainedError rather than falling back to the only cam.
+			video.facingMode = opts.facingMode;
+			delete video.deviceId;
+		}
+		return { ...base, video };
+	};
 
 	const effectiveIntervalMs = () => (opts.intervalMs != null
 		? opts.intervalMs
@@ -202,6 +358,7 @@ const init = async (userOptions = {}) => {
 	};
 
 	const tick = () => {
+		if (frozen) return;
 		if (video.readyState < 2) return;
 		const vw = video.videoWidth || opts.sampleSize;
 		const vh = video.videoHeight || opts.sampleSize;
@@ -213,11 +370,11 @@ const init = async (userOptions = {}) => {
 		const palette = analyseImageData(data, opts);
 		if (!palette.length) return;
 		const groups = splitByLuminance(palette, opts);
-		applyPalette(opts.target, groups, opts);
-		if (typeof opts.onPalette === 'function') opts.onPalette(palette, groups);
-		document.dispatchEvent(
-			new CustomEvent('cssadapt:palette', { detail: { palette, groups } }),
-		);
+		const roles = applyPalette(opts.target, groups, opts);
+		lastRoles = roles;
+		const detail = { palette, groups, roles };
+		if (typeof opts.onPalette === 'function') opts.onPalette(palette, groups, roles);
+		document.dispatchEvent(new CustomEvent('cssadapt:palette', { detail }));
 	};
 
 	const start = async () => {
@@ -225,7 +382,12 @@ const init = async (userOptions = {}) => {
 		if (!navigator.mediaDevices?.getUserMedia) {
 			throw new Error('cssadapt: getUserMedia is not available (needs HTTPS or localhost).');
 		}
-		stream = await navigator.mediaDevices.getUserMedia(opts.constraints);
+		stream = await navigator.mediaDevices.getUserMedia(buildConstraints());
+		// Record what we actually got: the browser may ignore facingMode on a
+		// device that has only one camera, and the UI should reflect reality.
+		const settings = stream.getVideoTracks()[0]?.getSettings?.() || {};
+		if (settings.facingMode) opts.facingMode = settings.facingMode;
+		if (settings.deviceId) opts.deviceId = settings.deviceId;
 		video.srcObject = stream;
 		await new Promise((resolve) => {
 			if (video.readyState >= 1) resolve();
@@ -250,10 +412,92 @@ const init = async (userOptions = {}) => {
 		return handle;
 	};
 
+	// Switching cameras means tearing the stream down and asking again; the
+	// timer keeps running so the palette simply resumes on the new feed.
+	const useCamera = async ({ facingMode, deviceId } = {}) => {
+		if (deviceId) {
+			opts.deviceId = deviceId;
+		} else if (facingMode) {
+			opts.facingMode = facingMode;
+			opts.deviceId = null;
+		}
+		if (!running) return handle;
+		if (stream) stream.getTracks().forEach((t) => t.stop());
+		stream = await navigator.mediaDevices.getUserMedia(buildConstraints());
+		const settings = stream.getVideoTracks()[0]?.getSettings?.() || {};
+		if (settings.facingMode) opts.facingMode = settings.facingMode;
+		if (settings.deviceId) opts.deviceId = settings.deviceId;
+		video.srcObject = stream;
+		await video.play().catch(() => { /* autoplay blocks are tolerated */ });
+		document.dispatchEvent(
+			new CustomEvent('cssadapt:camera', { detail: { facingMode: opts.facingMode } }),
+		);
+		return handle;
+	};
+
+	const listCameras = async () => {
+		if (!navigator.mediaDevices?.enumerateDevices) return [];
+		const devices = await navigator.mediaDevices.enumerateDevices();
+		return devices.filter((d) => d.kind === 'videoinput');
+	};
+
+	// Release the camera when the tab is hidden; resume only if we stopped it.
+	const onVisibility = () => {
+		if (document.hidden) {
+			if (running) {
+				resumeOnVisible = true;
+				stop();
+			}
+		} else if (resumeOnVisible) {
+			resumeOnVisible = false;
+			start().catch((err) => {
+				document.dispatchEvent(new CustomEvent('cssadapt:error', { detail: err }));
+			});
+		}
+	};
+	document.addEventListener('visibilitychange', onVisibility);
+
 	const handle = {
 		start,
 		stop,
 		tick,
+		useCamera,
+		listCameras,
+		switchCamera: () => useCamera({
+			facingMode: opts.facingMode === 'environment' ? 'user' : 'environment',
+		}),
+		freeze: () => {
+			frozen = true;
+			document.dispatchEvent(new CustomEvent('cssadapt:freeze'));
+			return handle;
+		},
+		thaw: () => {
+			frozen = false;
+			document.dispatchEvent(new CustomEvent('cssadapt:thaw'));
+			return handle;
+		},
+		get frozen() { return frozen; },
+		get facingMode() { return opts.facingMode; },
+		get roles() { return lastRoles; },
+		// Serialise the live variables so a palette can be lifted out of the
+		// page and pasted straight into a stylesheet.
+		toCss: () => {
+			const p = opts.prefix;
+			const names = [`${p}bg`, `${p}fg`, `${p}accent`];
+			for (let i = 1; i <= opts.paletteSize; i += 1) {
+				names.push(`${p}bg-${i}`, `${p}fg-${i}`);
+			}
+			const lines = names
+				.map((n) => [n, opts.target.style.getPropertyValue(n).trim()])
+				.filter(([, v]) => v)
+				.map(([n, v]) => `\t${n}: ${v};`);
+			return `:root {\n${lines.join('\n')}\n}`;
+		},
+		destroy: () => {
+			stop();
+			document.removeEventListener('visibilitychange', onVisibility);
+			return handle;
+		},
 		setSampleRate: (hz) => {
 			opts.sampleRateHz = hz;
 			opts.intervalMs = null;
@@ -311,9 +555,14 @@ export {
 	analyseImageData,
 	splitByLuminance,
 	applyPalette,
+	resolveRoles,
+	byHue,
 	rgbToHsl,
+	hslToRgb,
 	hslToCss,
 	relativeLuminance,
+	contrastRatio,
+	forceContrast,
 	DEFAULTS,
 };
 

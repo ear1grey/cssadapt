@@ -21,22 +21,15 @@
 	</header>
 
 	<main>
-		<section class="card">
-			<h2>How it works</h2>
-			<ol>
-				<li>A frame is grabbed from the webcam roughly once a second.</li>
-				<li>Pixels are quantised into hue / saturation / lightness buckets.</li>
-				<li>Buckets are split into <em>low</em> and <em>high</em> luminosity groups.</li>
-				<li>Low luminosity colours become backgrounds, high become foregrounds.</li>
-			</ol>
-		</section>
-
 		<section class="card card--accent">
 			<h2>Live palette</h2>
-			<p>
+			<p class="actions">
 				<button id="toggle" type="button">Start camera</button>
-				<span id="status" class="muted">Camera is off.</span>
+				<button id="switch" type="button" hidden>Switch camera</button>
+				<button id="freeze" type="button" hidden>Freeze</button>
+				<button id="copy" type="button" hidden>Copy CSS</button>
 			</p>
+			<p><span id="status" class="muted" role="status">Camera is off.</span></p>
 			<p class="control">
 				<label for="rate">Sample every <output id="rate-value">1.00</output> s</label>
 				<input id="rate" type="range" min="0.25" max="10" step="0.25" value="1">
@@ -53,6 +46,22 @@
 			<p class="muted">
 				The canvas is a small down-sampled copy used for analysis.
 			</p>
+		</section>
+
+		<section class="card">
+			<h2>How it works</h2>
+			<ol>
+				<li>A frame is grabbed from the camera roughly once a second.</li>
+				<li>Pixels are quantised into hue / saturation / lightness buckets.</li>
+				<li>Buckets are split into <em>low</em> and <em>high</em> luminosity groups.</li>
+				<li>Low luminosity colours become backgrounds, high become foregrounds.</li>
+				<li>
+					Foreground and accent are then nudged in lightness until they
+					clear WCAG AA contrast against the background, so the page
+					stays readable even in a flat or dimly lit scene.
+				</li>
+			</ol>
+			<p class="muted">Swatches are shown in hue order, not frequency order.</p>
 		</section>
 
 		<section class="card">
@@ -76,13 +85,16 @@
 	</footer>
 
 	<script type="module">
-		import { init, hslToCss } from './index.js';
+		import { init, hslToCss, byHue, contrastRatio } from './index.js';
 
 		const video = document.getElementById('camera');
 		const canvas = document.getElementById('frame');
 		const status = document.getElementById('status');
 		const swatches = document.getElementById('swatches');
 		const toggle = document.getElementById('toggle');
+		const switchBtn = document.getElementById('switch');
+		const freezeBtn = document.getElementById('freeze');
+		const copyBtn = document.getElementById('copy');
 		const rate = document.getElementById('rate');
 		const rateValue = document.getElementById('rate-value');
 
@@ -94,25 +106,36 @@
 
 		applyPeriod(parseFloat(rate.value));
 
+		// Mirror only the selfie view; the rear camera is not a mirror.
+		const setMirror = (facingMode) => {
+			video.classList.toggle('mirrored', facingMode === 'user');
+		};
+
 		const renderSwatches = ({ lows, highs }) => {
 			swatches.innerHTML = '';
-			const add = (group, c, label) => {
+			const add = (group, c) => {
 				const sw = document.createElement('span');
 				sw.className = `swatch swatch--${group}`;
 				sw.style.background = hslToCss(c.h, c.s, c.l);
-				sw.title = `${label} L=${c.luminance.toFixed(2)}`;
+				sw.title = `${group} h=${c.h.toFixed(0)}\u00b0 L=${c.luminance.toFixed(2)}`;
 				swatches.append(sw);
 			};
-			lows.forEach((c, i) => add('bg', c, `bg-${i + 1}`));
-			highs.forEach((c, i) => add('fg', c, `fg-${i + 1}`));
+			byHue(lows).forEach((c) => add('bg', c));
+			byHue(highs).forEach((c) => add('fg', c));
 		};
 
 		const handle = await init({
 			video,
 			canvas,
 			intervalMs: parseFloat(rate.value) * 1000,
-			onPalette: (palette, groups) => {
-				status.textContent = `Sampled ${palette.length} colour clusters.`;
+			onPalette: (palette, groups, roles) => {
+				const ratio = roles?.bg && roles?.fg
+					? contrastRatio(roles.fg.luminance, roles.bg.luminance)
+					: 0;
+				const notes = [`${palette.length} clusters`, `contrast ${ratio.toFixed(1)}:1`];
+				if (roles?.fg?.adjusted) notes.push('fg nudged for legibility');
+				if (groups.flat) notes.push('flat scene');
+				status.textContent = notes.join(' \u00b7 ');
 				renderSwatches(groups);
 			},
 		});
@@ -123,20 +146,74 @@
 			handle.setInterval(seconds * 1000);
 		});
 
+		const showRunningControls = (on) => {
+			[switchBtn, freezeBtn, copyBtn].forEach((b) => { b.hidden = !on; });
+		};
+
 		toggle.addEventListener('click', async () => {
 			if (handle.running) {
 				handle.stop();
 				toggle.textContent = 'Start camera';
 				status.textContent = 'Camera is off.';
+				showRunningControls(false);
 				return;
 			}
 			try {
 				status.textContent = 'Requesting camera\u2026';
 				await handle.start();
 				toggle.textContent = 'Stop camera';
+				setMirror(handle.facingMode);
+				showRunningControls(true);
+				// Only offer the switch when there is something to switch to.
+				const cams = await handle.listCameras();
+				switchBtn.hidden = cams.length < 2;
 			} catch (err) {
 				status.textContent = `Camera error: ${err.message}`;
 			}
+		});
+
+		switchBtn.addEventListener('click', async () => {
+			switchBtn.disabled = true;
+			try {
+				await handle.switchCamera();
+				setMirror(handle.facingMode);
+			} catch (err) {
+				status.textContent = `Could not switch camera: ${err.message}`;
+			} finally {
+				switchBtn.disabled = false;
+			}
+		});
+
+		freezeBtn.addEventListener('click', () => {
+			if (handle.frozen) {
+				handle.thaw();
+				freezeBtn.textContent = 'Freeze';
+			} else {
+				handle.freeze();
+				freezeBtn.textContent = 'Unfreeze';
+				status.textContent = 'Palette frozen.';
+			}
+		});
+
+		copyBtn.addEventListener('click', async () => {
+			const css = handle.toCss();
+			try {
+				await navigator.clipboard.writeText(css);
+				copyBtn.textContent = 'Copied';
+			} catch {
+				copyBtn.textContent = 'Copy failed';
+			}
+			setTimeout(() => { copyBtn.textContent = 'Copy CSS'; }, 1500);
+		});
+
+		// The library stops the camera when the tab hides; keep the UI honest.
+		document.addEventListener('cssadapt:stop', () => {
+			toggle.textContent = 'Start camera';
+			showRunningControls(false);
+		});
+		document.addEventListener('cssadapt:start', () => {
+			toggle.textContent = 'Stop camera';
+			showRunningControls(true);
 		});
 	</script>
 </body>
