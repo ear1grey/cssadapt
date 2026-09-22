@@ -34,7 +34,7 @@ const DEFAULTS = {
 	video: null, // optional HTMLVideoElement; one is created if absent
 	canvas: null, // optional HTMLCanvasElement; one is created if absent
 	facingMode: 'environment', // 'environment' (world) or 'user' (selfie)
-	deviceId: null, // explicit device wins over facingMode when set
+	deviceId: null, // explicit device wins over facingMode when set (see pinDevice)
 	constraints: { audio: false, video: { width: 640, height: 360 } },
 	autoStart: false,
 	onPalette: null, // (palette, groups) => void
@@ -322,6 +322,10 @@ const init = async (userOptions = {}) => {
 	let frozen = false;
 	let resumeOnVisible = false;
 	let lastRoles = null;
+	// What we're actually using right now, for display only. Distinct from
+	// opts.deviceId, which is a *request* and constrains the next call.
+	let activeDeviceId = null;
+	let activeLabel = '';
 
 	// Merge facingMode / deviceId into whatever video constraints were given,
 	// without clobbering a caller's width/height.
@@ -331,8 +335,13 @@ const init = async (userOptions = {}) => {
 			? { ...base.video }
 			: {};
 		if (opts.deviceId) {
-			video.deviceId = { exact: opts.deviceId };
-			delete video.facingMode;
+			// Soft, and facingMode is kept as the fallback. Mobile browsers
+			// invalidate deviceIds when a stream is torn down (Safari rotates
+			// them per session, Android drops them on release), so an `exact`
+			// deviceId reliably throws OverconstrainedError on the resume after
+			// visibilitychange. Ideal lets the browser fall back instead.
+			video.deviceId = { ideal: opts.deviceId };
+			if (opts.facingMode) video.facingMode = opts.facingMode;
 		} else if (opts.facingMode) {
 			// Not `exact`: desktops have no environment camera and would throw
 			// OverconstrainedError rather than falling back to the only cam.
@@ -340,6 +349,26 @@ const init = async (userOptions = {}) => {
 			delete video.deviceId;
 		}
 		return { ...base, video };
+	};
+
+	// Record what we actually got. Deliberately does NOT write deviceId back
+	// into opts: that would turn an incidental hardware id into a constraint on
+	// every later call, and mobile deviceIds don't survive a stream teardown.
+	// facingMode is safe to latch because it's a stable category, not an id.
+	const recordActiveTrack = () => {
+		const track = stream?.getVideoTracks?.()[0];
+		const settings = track?.getSettings?.() || {};
+		activeDeviceId = settings.deviceId || null;
+		activeLabel = track?.label || '';
+		if (settings.facingMode) {
+			opts.facingMode = settings.facingMode;
+		} else if (activeLabel) {
+			// iOS Safari omits facingMode from getSettings(). Fall back to the
+			// track label, which is localised but reliably contains front/back.
+			const label = activeLabel.toLowerCase();
+			if (/\bback\b|\brear\b|environment/.test(label)) opts.facingMode = 'environment';
+			else if (/\bfront\b|user|face/.test(label)) opts.facingMode = 'user';
+		}
 	};
 
 	const effectiveIntervalMs = () => (opts.intervalMs != null
@@ -383,11 +412,7 @@ const init = async (userOptions = {}) => {
 			throw new Error('cssadapt: getUserMedia is not available (needs HTTPS or localhost).');
 		}
 		stream = await navigator.mediaDevices.getUserMedia(buildConstraints());
-		// Record what we actually got: the browser may ignore facingMode on a
-		// device that has only one camera, and the UI should reflect reality.
-		const settings = stream.getVideoTracks()[0]?.getSettings?.() || {};
-		if (settings.facingMode) opts.facingMode = settings.facingMode;
-		if (settings.deviceId) opts.deviceId = settings.deviceId;
+		recordActiveTrack();
 		video.srcObject = stream;
 		await new Promise((resolve) => {
 			if (video.readyState >= 1) resolve();
@@ -415,6 +440,8 @@ const init = async (userOptions = {}) => {
 	// Switching cameras means tearing the stream down and asking again; the
 	// timer keeps running so the palette simply resumes on the new feed.
 	const useCamera = async ({ facingMode, deviceId } = {}) => {
+		const prevFacing = opts.facingMode;
+		const prevDevice = opts.deviceId;
 		if (deviceId) {
 			opts.deviceId = deviceId;
 		} else if (facingMode) {
@@ -422,11 +449,24 @@ const init = async (userOptions = {}) => {
 			opts.deviceId = null;
 		}
 		if (!running) return handle;
+		// Release first: phones commonly allow only one active camera, so
+		// requesting the other while this one is live fails outright.
 		if (stream) stream.getTracks().forEach((t) => t.stop());
-		stream = await navigator.mediaDevices.getUserMedia(buildConstraints());
-		const settings = stream.getVideoTracks()[0]?.getSettings?.() || {};
-		if (settings.facingMode) opts.facingMode = settings.facingMode;
-		if (settings.deviceId) opts.deviceId = settings.deviceId;
+		try {
+			stream = await navigator.mediaDevices.getUserMedia(buildConstraints());
+		} catch (err) {
+			// The requested camera doesn't exist or is busy. Restore what we had
+			// rather than leaving the page with a dead preview.
+			opts.facingMode = prevFacing;
+			opts.deviceId = prevDevice;
+			stream = await navigator.mediaDevices.getUserMedia(buildConstraints());
+			recordActiveTrack();
+			video.srcObject = stream;
+			await video.play().catch(() => {});
+			document.dispatchEvent(new CustomEvent('cssadapt:error', { detail: err }));
+			return handle;
+		}
+		recordActiveTrack();
 		video.srcObject = stream;
 		await video.play().catch(() => { /* autoplay blocks are tolerated */ });
 		document.dispatchEvent(
@@ -478,6 +518,8 @@ const init = async (userOptions = {}) => {
 		},
 		get frozen() { return frozen; },
 		get facingMode() { return opts.facingMode; },
+		get deviceId() { return activeDeviceId; },
+		get cameraLabel() { return activeLabel; },
 		get roles() { return lastRoles; },
 		// Serialise the live variables so a palette can be lifted out of the
 		// page and pasted straight into a stylesheet.

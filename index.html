@@ -140,6 +140,9 @@
 			},
 		});
 
+		// Handy when debugging on a real device over remote inspector.
+		window.cssadapt = handle;
+
 		rate.addEventListener('input', () => {
 			const seconds = parseFloat(rate.value);
 			applyPeriod(seconds);
@@ -214,6 +217,19 @@
 		document.addEventListener('cssadapt:start', () => {
 			toggle.textContent = 'Stop camera';
 			showRunningControls(true);
+			// Phones can hand back the other camera on resume; re-read it.
+			setMirror(handle.facingMode);
+		});
+		document.addEventListener('cssadapt:camera', () => setMirror(handle.facingMode));
+
+		// Without this, a failed auto-resume left the page looking alive but
+		// frozen, with no clue why. Most common on phones after a lock/unlock.
+		document.addEventListener('cssadapt:error', (e) => {
+			status.textContent = `Camera error: ${e.detail?.message || e.detail}`;
+			if (!handle.running) {
+				toggle.textContent = 'Start camera';
+				showRunningControls(false);
+			}
 		});
 	</script>
 </body>
